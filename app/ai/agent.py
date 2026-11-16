@@ -16,6 +16,10 @@ from app.ai.tools import (
 )
 from app.core.config import settings
 
+from sqlalchemy import select
+
+from app.models import Conversation, ConversationMessage
+
 
 MAX_TOOL_ROUNDS = 5
 
@@ -65,18 +69,77 @@ def execute_tool(
         }
 
 
+
+
+
+
 def run_agent(
     db: Session,
     company_id: int,
     user_message: str,
-) -> str:
+    conversation_id: int | None = None,
+) -> dict:
+
+    # 1. Retrieve or create conversation
+
+    if conversation_id is None:
+        conversation = Conversation(
+            company_id=company_id,
+        )
+
+        db.add(conversation)
+        db.commit()
+        db.refresh(conversation)
+
+    else:
+        conversation = db.scalar(
+            select(Conversation).where(
+                Conversation.id == conversation_id,
+                Conversation.company_id == company_id,
+            )
+        )
+
+        if not conversation:
+            raise ValueError("Conversation not found.")
+
+    # 2. Retrieve previous conversation history
+
+    history = db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id
+        )
+        .order_by(ConversationMessage.id.desc())
+        .limit(20)
+    ).all()
+
+    history = list(reversed(history))
 
     input_items = [
         {
-            "role": "user",
-            "content": user_message,
+            "role": message.role,
+            "content": message.content,
         }
+        for message in history
     ]
+
+    # 3. Save current user message
+
+    db.add(
+        ConversationMessage(
+            conversation_id=conversation.id,
+            role="user",
+            content=user_message,
+        )
+    )
+    db.commit()
+
+    input_items.append({
+        "role": "user",
+        "content": user_message,
+    })
+
+    # 4. Agent instructions
 
     instructions = """
     You are an enterprise operations assistant.
@@ -93,7 +156,10 @@ def run_agent(
     - You are a read-only assistant.
     - Never claim that you modified business data.
     - Answer in the same language as the user.
+    - Use previous conversation messages to understand context.
     """
+
+    # 5. Execute agent loop
 
     for _ in range(MAX_TOOL_ROUNDS):
 
@@ -111,9 +177,24 @@ def run_agent(
         ]
 
         if not function_calls:
-            return response.output_text
 
-        # Preserve the model's response, including its tool calls.
+            answer = response.output_text
+
+            db.add(
+                ConversationMessage(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=answer,
+                )
+            )
+
+            db.commit()
+
+            return {
+                "conversation_id": conversation.id,
+                "answer": answer,
+            }
+
         input_items.extend(response.output)
 
         for tool_call in function_calls:
@@ -138,3 +219,4 @@ def run_agent(
     raise RuntimeError(
         "Maximum number of tool execution rounds exceeded."
     )
+

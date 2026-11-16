@@ -1,3 +1,6 @@
+
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -7,6 +10,8 @@ from app.schemas.assistant import (
     AssistantRequest,
     AssistantResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -20,17 +25,29 @@ def ask_assistant(
     request: AssistantRequest,
     db: Session = Depends(get_db),
 ):
-
     try:
-        answer = run_agent(
+        result = run_agent(
             db=db,
             company_id=company_id,
             user_message=request.message,
+            conversation_id=request.conversation_id,
         )
 
-        return AssistantResponse(answer=answer)
+        return AssistantResponse(**result)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
 
     except Exception:
+        db.rollback()
+
+        logger.exception(
+            "Error while executing AI assistant"
+        )
+
         raise HTTPException(
             status_code=502,
             detail="The AI assistant could not process the request.",
